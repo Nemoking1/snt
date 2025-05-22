@@ -1,4 +1,4 @@
 required_sheet:CREATED,NOT INCLUDED,COORDINATED,REQUESTED,BOOKED
 default_sheet:Sheet1
-key_fields:folder,po,lot
+key_fields:lot
 required_fields:fwd_feedback,REMARK

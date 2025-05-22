@@ -1,5 +1,4 @@
 folder:folder
-bu:bu
 po:po
 lot:lot
 esd:esd

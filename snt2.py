@@ -1,13 +1,16 @@
 from datetime import datetime
 import os
+import sys
 import concurrent.futures
+import openpyxl
 from pathlib import Path
 from collections import defaultdict
 from openpyxl import load_workbook
 from sinotrans.core import FileParser, ExcelProcessor
-from sinotrans.utils import Logger, GlobalThreadPool, ProgressManager
+from sinotrans.utils import Logger, GlobalThreadPool, ExcelProgressTracker
 import warnings
 import traceback
+import threading
 
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
@@ -23,7 +26,7 @@ class AutoSntProcessor:
     REQUIRED_FIELDS = "required_fields"
 
     def __init__(self):
-        # 初始化路径配置
+        # 初始化路径配置os.path.dirname(os.path.realpath(sys.executable))os.path.abspath(__file__)
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.current_dir = os.path.dirname(os.path.abspath(__file__))
         self._init_paths()
@@ -66,13 +69,13 @@ class AutoSntProcessor:
     def _load_mappings(self):
         """加载所有映射配置"""
         try:
+            Logger.info("📋 开始处理映射文件......")
             sheet_conf = FileParser.parse_mapping_dict(self.sheet_config_file,':', '|', ',', '=')
             self.default_fallback_sheets = sheet_conf.get(self.DEFAULT_SHEET).field_name.split(",")
             self.key_fields = sheet_conf.get(self.KEY_FIELDS).field_name.split(",")
             self.required_fields = sheet_conf.get(self.REQUIRED_FIELDS).field_name.split(",")
             self.sheet_names = sheet_conf.get(self.REQUIRED_SHEET).field_name.split(",")
 
-            # self.sheet_names = FileParser.parse_conf(self.sheet_config_file, ',')
             self.fixed_mapping = FileParser.parse_mapping_dict(self.fixed_mapping_file,':', '|', ',', '=')   # 模板值映射
             self.snt_mapping = FileParser.parse_mapping_dict_of_list(self.pending_po_mapping_file,':', '|', ',', '=')
             self.response_mapping = FileParser.parse_mapping_dict_of_list(self.response_mapping_file,':', '|', ',', '=')
@@ -165,6 +168,87 @@ class AutoSntProcessor:
             base_data[key].update(ExcelProcessor.column_mapping(row, column_mapping))
             # Logger.info(f"更新 {key} 的 {column_mapping} 列")
         return has_valid_data
+    def _process_single_row1(self, input_ws, fp, snt_data, base_data, column_mapping, data_lock=None):
+        """处理单个工作表的行数据（线程安全版本）"""
+        # 获取当前有效工作表的行生成器
+        data_gen = ExcelProcessor.excel_row_generator(
+            input_ws,
+            fp,
+            None,
+            self.required_fields,
+            strict_flag=False
+        )
+        
+        has_valid_data = False
+        for row in data_gen:
+            has_valid_data = True
+            key = tuple(row[field] for field in self.key_fields)
+            if key not in snt_data:
+                Logger.debug(f"未找到匹配项: {key}，跳过更新")
+                continue
+            
+            # 使用锁保护共享数据的更新操作
+            if data_lock:
+                with data_lock:
+                    base_data[key].update(ExcelProcessor.column_mapping(row, column_mapping))
+            else:
+                # 非并发场景下的原始逻辑
+                base_data[key].update(ExcelProcessor.column_mapping(row, column_mapping))
+        
+        return has_valid_data
+    
+    def _process_single_file(self, sheets_wb, sheet_name, fp, snt_data, base_data, column_mapping, data_lock):
+        """
+        并发处理单个文件的数据，并安全地更新共享的 base_data 字典。
+
+        参数:
+        - sheets_wb (dict): 当前文件的工作表字典，键为工作表名，值为 Worksheet 对象。
+        - sheet_name (str): 需要处理的目标工作表名称。
+        - fp (str): 文件路径。
+        - snt_data (dict): 基准数据（来自 SNT 文件），用于匹配关键字段。
+        - base_data (dict): 共享字典，用于存储最终合并后的数据，key 为 key_fields 的元组。
+        - column_mapping (dict): 列映射配置，用于将输入列与目标列对齐。
+        - data_lock (threading.Lock): 线程锁对象，确保多线程环境下对 base_data 的安全访问。
+
+        返回值:
+        - None: 结果直接写入 base_data。
+
+        异常处理:
+        - 如果处理过程中发生错误，会记录日志但不会中断主线程。
+        
+        日志输出:
+        - 如果找不到有效工作表或未找到有效数据，会记录警告信息。
+        """
+        try:
+            # sheets_wb = self.sheet_maps[fp]
+            # 获取有效工作表(如果找不到Sheet_name，则使用默认回退表)
+            input_ws, is_defalut_sheet = self._get_valid_sheet(sheets_wb, sheet_name)
+            if not input_ws:
+                Logger.error(f"🛑 文件 {Path(fp).name} 无有效工作表")
+                return
+                
+            # 调用原有的行处理方法（需修改为线程安全版本）
+            roll_back = not self._process_single_row1(input_ws, fp, snt_data, base_data, column_mapping, data_lock)
+            
+            # 若表中无数据，且使用的不是默认表，则尝试获取默认表数据
+            if not is_defalut_sheet and roll_back:
+                has_valid_data = False
+                # 获取默认表
+                for default_sheet_name in self.default_fallback_sheets:
+                    input_ws = self._get_valid_sheet(sheets_wb, default_sheet_name)
+                    # 默认表有效
+                    if input_ws and self._validate_sheet_headers(input_ws):
+                        Logger.info(f"🛑 文件{fp}⏩ 使用回退表 [{default_sheet_name}]")
+                        # 不短路
+                        has_valid_data = has_valid_data | self._process_single_row1(
+                            input_ws, fp, snt_data, base_data, column_mapping, data_lock
+                        )
+                if not has_valid_data:
+                    # 存在业务场景，sheet_name就是没有业务数据，也不存在默认表
+                    Logger.info(f"⚠️ 文件{fp}:【{sheet_name}】中无有效数据")
+        except Exception as e:
+            Logger.error(f"处理文件 {fp} 时发生错误: {str(e)}")
+            raise RuntimeError ("测试")
 
     def _process_single_sheet(self, sheet_name, output_wb):
         """处理单个工作表"""
@@ -174,7 +258,7 @@ class AutoSntProcessor:
             headers = [cell.value for cell in output_ws[1]]
 
             Logger.info(f"🔨 开始处理工作表 [{sheet_name}]")
-            progress = ProgressManager()
+            progress = ExcelProgressTracker()
             # ----------------------------
             # 阶段一：加载SNT基准数据到内存
             # ----------------------------
@@ -236,33 +320,43 @@ class AutoSntProcessor:
                 if not column_mapping:
                     raise RuntimeError (f"⚠️ 未找到 [{folder}] 的列映射配置")
 
-                # 当前文件夹的所有文件
-                for fp in fps:
-                    sheets_wb = self.sheet_maps[fp]
-                    # 获取有效工作表(如果找不到Sheet_name，则使用默认回退表)
-                    input_ws, is_defalut_sheet = self._get_valid_sheet(sheets_wb, sheet_name)
-                    if not input_ws:
-                        Logger.error(f"🛑 文件 {Path(fp).name} 无有效工作表")
-                        continue
-                    progress = ProgressManager()
-                    roll_back = not self._process_single_row(input_ws, fp, progress, snt_data, base_data, column_mapping)
-                    progress.close()
-                    # 若表中无数据，且使用的不是默认表，则尝试获取默认表数据
-                    if not is_defalut_sheet and roll_back:
-                        has_valid_data = False
-                        # 获取默认表
-                        for default_sheet_name in self.default_fallback_sheets:
-                            input_ws = self._get_valid_sheet(sheets_wb, default_sheet_name)
-                            # 默认表有效
-                            if input_ws and self._validate_sheet_headers(input_ws):
-                                Logger.info(f"🛑 文件{fp}⏩ 使用回退表 [{default_sheet_name}]")
-                                progress = ProgressManager()
-                                # 不短路
-                                has_valid_data = has_valid_data | self._process_single_row(input_ws, fp, progress, snt_data, base_data, column_mapping)
-                                progress.close()
-                        if not has_valid_data:
-                            # 存在业务场景，sheet_name就是没有业务数据，也不存在默认表
-                            Logger.info(f"⚠️ 文件{fp}:【{sheet_name}】中无有效数据")
+                # 使用线程池并发处理文件
+                data_lock = threading.Lock()
+                with GlobalThreadPool.get_executor() as executor:
+                    futures = [executor.submit(self._process_single_file, self.sheet_maps[fp], sheet_name, fp, snt_data, base_data, column_mapping, data_lock) for fp in fps]
+                
+                done, not_done = concurrent.futures.wait(futures, timeout = 60)
+
+                # 等待所有任务完成
+                for future in futures:
+                    future.result()  # 获取结果，触发可能的异常
+                # # 当前文件夹的所有文件
+                # for fp in fps:
+                #     sheets_wb = self.sheet_maps[fp]
+                #     # 获取有效工作表(如果找不到Sheet_name，则使用默认回退表)
+                #     input_ws, is_defalut_sheet = self._get_valid_sheet(sheets_wb, sheet_name)
+                #     if not input_ws:
+                #         Logger.error(f"🛑 文件 {Path(fp).name} 无有效工作表")
+                #         continue
+                #     progress = ProgressManager()
+                #     roll_back = not self._process_single_row(input_ws, fp, progress, snt_data, base_data, column_mapping)
+                #     progress.close()
+                #     # 若表中无数据，且使用的不是默认表，则尝试获取默认表数据
+                #     if not is_defalut_sheet and roll_back:
+                #         has_valid_data = False
+                #         # 获取默认表
+                #         for default_sheet_name in self.default_fallback_sheets:
+                #             input_ws = self._get_valid_sheet(sheets_wb, default_sheet_name)
+                #             # 默认表有效
+                #             if input_ws and self._validate_sheet_headers(input_ws):
+                #                 Logger.info(f"🛑 文件{fp}⏩ 使用回退表 [{default_sheet_name}]")
+                #                 progress = ProgressManager()
+                #                 # 不短路
+                #                 has_valid_data = has_valid_data | self._process_single_row(input_ws, fp, progress, snt_data, base_data, column_mapping)
+                #                 progress.close()
+                #         if not has_valid_data:
+                #             # 存在业务场景，sheet_name就是没有业务数据，也不存在默认表
+                #             Logger.info(f"⚠️ 文件{fp}:【{sheet_name}】中无有效数据")
                     
             # ----------------------------
             # 阶段三：写入最终数据
@@ -275,8 +369,34 @@ class AutoSntProcessor:
 
         except Exception as e:
             Logger.error(f"❌ 工作表 [{sheet_name}] 处理失败: {str(e)}")
-            progress.close() if 'progress' in locals() else None
+            Logger.debug(f"{traceback.format_exc()}")
             return False
+    
+    def _thread_safe_process_sheet(self, sheet_name, template_wb):
+        """线程安全的工作表处理方法"""
+        try:
+            # 创建临时工作簿副本
+            thread_wb = openpyxl.Workbook()
+            template_ws = template_wb[sheet_name]
+            new_ws = thread_wb.create_sheet(sheet_name)
+            
+            # 复制表头
+            for row in template_ws.iter_rows():
+                new_ws.append([cell.value for cell in row])
+            
+            # 执行实际处理（操作临时工作簿）
+            success = self._process_single_sheet(sheet_name, thread_wb)
+            
+            # 提取处理后的数据
+            processed_data = []
+            for row in new_ws.iter_rows(min_row=2):  # 跳过标题行
+                processed_data.append([cell.value for cell in row])
+                
+            return (success, processed_data)
+        except Exception as e:
+            Logger.error(f"线程处理异常: {traceback.format_exc()}")
+            return (False, None)
+            
     def run(self):
         """主执行流程"""
         try:
