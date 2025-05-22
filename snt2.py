@@ -32,6 +32,7 @@ class AutoSntProcessor:
         self._init_paths()
         self._init_logger()
         self._init_thread_pool()
+        self._init_styles()
 
     def _init_paths(self):
         """初始化所有路径配置"""
@@ -65,6 +66,12 @@ class AutoSntProcessor:
             max_workers=16,
             thread_name_prefix='AutoSNTThreadPool'
         )
+    def _init_styles(self):
+        """初始化Excel样式"""
+        self.header_style = openpyxl.styles.NamedStyle(name="header_style")
+        self.header_style.font = openpyxl.styles.Font(name="Calibri", bold=True, color="FFFFFF")
+        self.header_style.fill = openpyxl.styles.PatternFill(fill_type="solid", fgColor="4F81BD")
+        # self.header_style.alignment = openpyxl.styles.Alignment(horizontal="center", vertical="center")
 
     def _load_mappings(self):
         """加载所有映射配置"""
@@ -364,6 +371,8 @@ class AutoSntProcessor:
             # 排序按表头排序
             ordered_rows = ExcelProcessor.sort_generated_rows(base_data.values(), output_ws)
             list(map(lambda row: output_ws.append(row), ordered_rows))
+            # 格式设置
+            self._style_apply(output_ws)
             Logger.info(f"✅ 工作表 [{sheet_name}] 处理完成，共更新 {len(base_data.values())} 行数据")
             return True
 
@@ -371,7 +380,26 @@ class AutoSntProcessor:
             Logger.error(f"❌ 工作表 [{sheet_name}] 处理失败: {str(e)}")
             Logger.debug(f"{traceback.format_exc()}")
             return False
-    
+    def _style_apply(self, output_ws):
+        output_ws.freeze_panes = "A2"
+        for cell in output_ws[1]:
+            cell.style = self.header_style
+        # 设置固定列宽（所有列宽度为15）
+        list(map(lambda col: setattr(output_ws.column_dimensions[col], 'width', 20), ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T']))
+        # 隔行填充背景色
+        fill = openpyxl.styles.PatternFill(fill_type='solid', start_color='C8D7E9', end_color='C8D7E9')
+        for row_num in range(2, output_ws.max_row + 1):  # 从第2行开始（第1行是表头）
+            if row_num % 2 == 0:
+                for col_num in range(1, output_ws.max_column + 1):
+                    cell = output_ws.cell(row=row_num, column=col_num)
+                    cell.fill = fill
+                    cell.font = openpyxl.styles.Font(name='Calibri', size=11)
+            else:
+                for col_num in range(1, output_ws.max_column + 1):
+                    cell = output_ws.cell(row=row_num, column=col_num)
+                    cell.font = openpyxl.styles.Font(name='Calibri', size=11)
+
+
     def _thread_safe_process_sheet(self, sheet_name, template_wb):
         """线程安全的工作表处理方法"""
         try:
