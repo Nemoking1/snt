@@ -1,1 +1,4 @@
-CREATED,NOT INCLUDED,COORDINATED,REQUESTED,BOOKED
+required_sheet:CREATED,NOT INCLUDED,COORDINATED,REQUESTED,BOOKED
+default_sheet:Sheet1
+key_fields:folder,po,lot
+required_fields:fwd_feedback,REMARK
