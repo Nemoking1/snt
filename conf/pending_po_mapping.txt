@@ -1,4 +1,5 @@
 folder:folder
+bu:bu
 po:po
 lot:lot
 esd:esd
@@ -10,3 +11,4 @@ pod:pod
 status:status
 criteria:criteria
 fwd_feedback:fwd_feedback
+so_number:so_number

@@ -72,7 +72,50 @@ class AutoSntProcessor:
         self.header_style.font = openpyxl.styles.Font(name="Calibri", bold=True, color="FFFFFF")
         self.header_style.fill = openpyxl.styles.PatternFill(fill_type="solid", fgColor="4F81BD")
         # self.header_style.alignment = openpyxl.styles.Alignment(horizontal="center", vertical="center")
+    def _style_apply(self, output_ws):
+        output_ws.freeze_panes = "A2"
+        for cell in output_ws[1]:
+            cell.style = self.header_style
+        # 设置固定列宽（所有列宽度为15）
+        list(map(lambda col: setattr(output_ws.column_dimensions[col], 'width', 20), ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T']))
+        # 隔行填充背景色
+        fill = openpyxl.styles.PatternFill(fill_type='solid', start_color='C8D7E9', end_color='C8D7E9')
+        for row_num in range(2, output_ws.max_row + 1):  # 从第2行开始（第1行是表头）
+            if row_num % 2 == 0:
+                for col_num in range(1, output_ws.max_column + 1):
+                    cell = output_ws.cell(row=row_num, column=col_num)
+                    cell.fill = fill
+                    cell.font = openpyxl.styles.Font(name='Calibri', size=11)
+            else:
+                for col_num in range(1, output_ws.max_column + 1):
+                    cell = output_ws.cell(row=row_num, column=col_num)
+                    cell.font = openpyxl.styles.Font(name='Calibri', size=11)
 
+
+    def _thread_safe_process_sheet(self, sheet_name, template_wb):
+        """线程安全的工作表处理方法"""
+        try:
+            # 创建临时工作簿副本
+            thread_wb = openpyxl.Workbook()
+            template_ws = template_wb[sheet_name]
+            new_ws = thread_wb.create_sheet(sheet_name)
+            
+            # 复制表头
+            for row in template_ws.iter_rows():
+                new_ws.append([cell.value for cell in row])
+            
+            # 执行实际处理（操作临时工作簿）
+            success = self._process_single_sheet(sheet_name, thread_wb)
+            
+            # 提取处理后的数据
+            processed_data = []
+            for row in new_ws.iter_rows(min_row=2):  # 跳过标题行
+                processed_data.append([cell.value for cell in row])
+                
+            return (success, processed_data)
+        except Exception as e:
+            Logger.error(f"线程处理异常: {traceback.format_exc()}")
+            return (False, None)
     def _load_mappings(self):
         """加载所有映射配置"""
         try:
@@ -101,7 +144,7 @@ class AutoSntProcessor:
             # 校验所有文件的工作表结构
             all_files = self.snt_files + self.response_files
             # 预设模板文件检查（保持严格校验）
-            self.sheet_maps = ExcelProcessor.get_workbook_sheets(
+            self.sheet_maps = ExcelProcessor.get_excel_sheets(
                 file_paths=all_files,
                 preset_sheets=self.sheet_names,  # 用于生成警告信息
                 read_only=True,
@@ -156,7 +199,7 @@ class AutoSntProcessor:
     def _process_single_row(self, input_ws, fp, progress, snt_data, base_data, column_mapping):
 
         # 获取当前有效工作表的行生成器，检查REQUIRED_FIELDS是否存在数据，都不存在会报错
-        data_gen = ExcelProcessor.excel_row_generator(
+        data_gen = ExcelProcessor.excel_row_generator_skipping(
             input_ws,
             fp,
             progress,
@@ -175,10 +218,10 @@ class AutoSntProcessor:
             base_data[key].update(ExcelProcessor.column_mapping(row, column_mapping))
             # Logger.info(f"更新 {key} 的 {column_mapping} 列")
         return has_valid_data
-    def _process_single_row1(self, input_ws, fp, snt_data, base_data, column_mapping, data_lock=None):
+    def _process_single_row(self, input_ws, fp, snt_data, base_data, column_mapping, data_lock=None):
         """处理单个工作表的行数据（线程安全版本）"""
         # 获取当前有效工作表的行生成器
-        data_gen = ExcelProcessor.excel_row_generator(
+        data_gen = ExcelProcessor.excel_row_generator_skipping(
             input_ws,
             fp,
             None,
@@ -204,12 +247,12 @@ class AutoSntProcessor:
         
         return has_valid_data
     
-    def _process_single_file(self, sheets_wb, sheet_name, fp, snt_data, base_data, column_mapping, data_lock):
+    def _process_single_file(self, sheets_wb_map, sheet_name, fp, snt_data, base_data, column_mapping, data_lock):
         """
         并发处理单个文件的数据，并安全地更新共享的 base_data 字典。
 
         参数:
-        - sheets_wb (dict): 当前文件的工作表字典，键为工作表名，值为 Worksheet 对象。
+        - sheets_wb_map (dict): self.sheet_maps[fp]，值为 Worksheet 对象。
         - sheet_name (str): 需要处理的目标工作表名称。
         - fp (str): 文件路径。
         - snt_data (dict): 基准数据（来自 SNT 文件），用于匹配关键字段。
@@ -227,27 +270,26 @@ class AutoSntProcessor:
         - 如果找不到有效工作表或未找到有效数据，会记录警告信息。
         """
         try:
-            # sheets_wb = self.sheet_maps[fp]
             # 获取有效工作表(如果找不到Sheet_name，则使用默认回退表)
-            input_ws, is_defalut_sheet = self._get_valid_sheet(sheets_wb, sheet_name)
+            input_ws, is_defalut_sheet = self._get_valid_sheet(sheets_wb_map, sheet_name)
             if not input_ws:
                 Logger.error(f"🛑 文件 {Path(fp).name} 无有效工作表")
                 return
                 
             # 调用原有的行处理方法（需修改为线程安全版本）
-            roll_back = not self._process_single_row1(input_ws, fp, snt_data, base_data, column_mapping, data_lock)
+            roll_back = not self._process_single_row(input_ws, fp, snt_data, base_data, column_mapping, data_lock)
             
             # 若表中无数据，且使用的不是默认表，则尝试获取默认表数据
             if not is_defalut_sheet and roll_back:
                 has_valid_data = False
                 # 获取默认表
                 for default_sheet_name in self.default_fallback_sheets:
-                    input_ws = self._get_valid_sheet(sheets_wb, default_sheet_name)
+                    input_ws = self._get_valid_sheet(sheets_wb_map, default_sheet_name)
                     # 默认表有效
                     if input_ws and self._validate_sheet_headers(input_ws):
                         Logger.info(f"🛑 文件{fp}⏩ 使用回退表 [{default_sheet_name}]")
                         # 不短路
-                        has_valid_data = has_valid_data | self._process_single_row1(
+                        has_valid_data = has_valid_data | self._process_single_row(
                             input_ws, fp, snt_data, base_data, column_mapping, data_lock
                         )
                 if not has_valid_data:
@@ -257,25 +299,19 @@ class AutoSntProcessor:
             Logger.error(f"处理文件 {fp} 时发生错误: {str(e)}")
             raise RuntimeError ("测试")
 
-    def _process_single_sheet(self, sheet_name, output_wb):
-        """处理单个工作表"""
+    def _load_snt_data(self, sheet_name, headers):
+        """
+        将snt当前sheet_name数据存在关键字段keys——用于联系数据，的行写入内存{key_tuple,row}
+        """
         try:
-            # 获取当前sheet_name工作表的输出句柄、表头列表，用于后续处理
-            output_ws = output_wb[sheet_name]
-            headers = [cell.value for cell in output_ws[1]]
-
-            Logger.info(f"🔨 开始处理工作表 [{sheet_name}]")
-            progress = ExcelProgressTracker()
-            # ----------------------------
-            # 阶段一：加载SNT基准数据到内存
-            # ----------------------------
             snt_file = next((fp for fp in self.sheet_maps.keys() if self._get_folder_type(fp) == os.path.basename(self.snt_path)), None)
             if not snt_file:
                 raise RuntimeError(f"未找到{self.snt_path}文件夹下的基准文件")
 
             snt_data = {}
+            base_data = {}
+            progress = ExcelProgressTracker()
             snt_ws = self.sheet_maps[snt_file][sheet_name]
-            # 将snt当前sheet_name数据存在关键字段keys——用于联系数据，的行写入内存{key_tuple,row}
             snt_gen = ExcelProcessor.excel_row_generator(
                 snt_ws,
                 snt_file,
@@ -289,48 +325,60 @@ class AutoSntProcessor:
                     Logger.info(f"⚠️ 发现重复基准数据: {key}")
                 snt_data[key] = row
 
-            progress.close()
-            Logger.info(f"📥 已加载 {len(snt_data)} 条有效基准数据")
-
-            # --------------------------------------------
-            # 阶段二：创建含有key索引的新行，将snt数据映射进去
-            # --------------------------------------------
-            base_data = {}
             for key, snt_row in snt_data.items():
                 # 获取目标列格式——也就是模板列格式
                 base_row = {header: '' for header in headers}
                 base_row.update(ExcelProcessor.fixed_mapping(self.fixed_mapping))
                 base_row.update(ExcelProcessor.column_mapping(snt_row, self.snt_mapping))
                 base_data[key] = base_row
+                
+            progress.close()
+            Logger.info(f"📥 已加载 {len(snt_data)} 条有效基准数据")
+            return snt_file, snt_data, base_data
+        except Exception as e:
+            raise RuntimeError (f"❌ 内存加载{snt_file}基准数据失败: {str(e)}")
 
+    def _process_single_sheet(self, sheet_name, output_wb):
+        """处理单个工作表"""
+        try:
+            # 获取当前sheet_name工作表的输出句柄、表头列表，用于后续处理
+            output_ws = output_wb[sheet_name]
+            headers = [cell.value for cell in output_ws[1]]
+            Logger.info(f"🔨 开始处理工作表 [{sheet_name}]")
 
-            # -----------------------------------------------------------------
-            # 阶段三：处理其他文件数据，以文件夹为读取单位，以sheet_name为写入单位
-            # -----------------------------------------------------------------
+            snt_file, snt_data, base_data = self._load_snt_data(sheet_name, headers)
 
-            folder_sources = defaultdict(list)
-            # total_rows = 0
             # 将sheet_maps中的fp按文件夹分类
+            folder_sources = defaultdict(list)
             for fp in self.sheet_maps.keys():
                 if fp == snt_file:
                     continue
                 folder_sources[self._get_folder_type(fp)].append(fp)
-                #total_rows += self.sheet_maps[fp][sheet_name].max_row
 
-            # progress.init_main_progress(desc="正在合并数据", total=total_rows)
-
-            # 文件夹
+            # 所有文件夹
             for folder, fps in folder_sources.items():
                 Logger.info(f"🔄 正在处理 [{folder}] 文件夹内数据...")
                 
-                column_mapping =  self.response_mapping
+                column_mapping =  self.response_mapping # TODO 扩充至report_mapping
                 if not column_mapping:
                     raise RuntimeError (f"⚠️ 未找到 [{folder}] 的列映射配置")
 
                 # 使用线程池并发处理文件
                 data_lock = threading.Lock()
                 with GlobalThreadPool.get_executor() as executor:
-                    futures = [executor.submit(self._process_single_file, self.sheet_maps[fp], sheet_name, fp, snt_data, base_data, column_mapping, data_lock) for fp in fps]
+                    futures = [
+                        executor.submit(
+                            self._process_single_file, 
+                            self.sheet_maps[fp], 
+                            sheet_name, 
+                            fp, 
+                            snt_data, 
+                            base_data, # 共享变量，线程安全
+                            column_mapping, 
+                            data_lock
+                            ) 
+                            for fp in fps
+                            ]
                 
                 done, not_done = concurrent.futures.wait(futures, timeout = 60)
 
@@ -380,51 +428,6 @@ class AutoSntProcessor:
             Logger.error(f"❌ 工作表 [{sheet_name}] 处理失败: {str(e)}")
             Logger.debug(f"{traceback.format_exc()}")
             return False
-    def _style_apply(self, output_ws):
-        output_ws.freeze_panes = "A2"
-        for cell in output_ws[1]:
-            cell.style = self.header_style
-        # 设置固定列宽（所有列宽度为15）
-        list(map(lambda col: setattr(output_ws.column_dimensions[col], 'width', 20), ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T']))
-        # 隔行填充背景色
-        fill = openpyxl.styles.PatternFill(fill_type='solid', start_color='C8D7E9', end_color='C8D7E9')
-        for row_num in range(2, output_ws.max_row + 1):  # 从第2行开始（第1行是表头）
-            if row_num % 2 == 0:
-                for col_num in range(1, output_ws.max_column + 1):
-                    cell = output_ws.cell(row=row_num, column=col_num)
-                    cell.fill = fill
-                    cell.font = openpyxl.styles.Font(name='Calibri', size=11)
-            else:
-                for col_num in range(1, output_ws.max_column + 1):
-                    cell = output_ws.cell(row=row_num, column=col_num)
-                    cell.font = openpyxl.styles.Font(name='Calibri', size=11)
-
-
-    def _thread_safe_process_sheet(self, sheet_name, template_wb):
-        """线程安全的工作表处理方法"""
-        try:
-            # 创建临时工作簿副本
-            thread_wb = openpyxl.Workbook()
-            template_ws = template_wb[sheet_name]
-            new_ws = thread_wb.create_sheet(sheet_name)
-            
-            # 复制表头
-            for row in template_ws.iter_rows():
-                new_ws.append([cell.value for cell in row])
-            
-            # 执行实际处理（操作临时工作簿）
-            success = self._process_single_sheet(sheet_name, thread_wb)
-            
-            # 提取处理后的数据
-            processed_data = []
-            for row in new_ws.iter_rows(min_row=2):  # 跳过标题行
-                processed_data.append([cell.value for cell in row])
-                
-            return (success, processed_data)
-        except Exception as e:
-            Logger.error(f"线程处理异常: {traceback.format_exc()}")
-            return (False, None)
-            
     def run(self):
         """主执行流程"""
         try:
