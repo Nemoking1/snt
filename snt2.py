@@ -6,7 +6,7 @@ import openpyxl
 from pathlib import Path
 from collections import defaultdict
 from openpyxl import load_workbook
-from sinotrans.core import FileParser, ExcelProcessor
+from sinotrans.core import FileProcessor, ExcelProcessor
 from sinotrans.utils import Logger, GlobalThreadPool, ExcelProgressTracker
 import warnings
 import traceback
@@ -42,15 +42,14 @@ class AutoSntProcessor:
         self.response_path = os.path.join(self.current_dir, "res")
         
         self.template_file = os.path.join(self.current_dir, "template.xlsx")
-        self.target_file = os.path.join(self.target_path, f"output_{self.timestamp}.xlsx")
+        self.target_file = os.path.join(self.target_path, f"PendingPoSnt_{self.timestamp}.xlsx")
 
         self.sheet_config_file = os.path.join(self.config_path, "sheet_config.txt")
         self.fixed_mapping_file = os.path.join(self.config_path, "fixed_mapping.txt")
         self.pending_po_mapping_file = os.path.join(self.config_path, "pending_po_mapping.txt")
         self.response_mapping_file = os.path.join(self.config_path, "response_mapping.txt")
-        self.target_file = os.path.join(self.target_path, f"output_{self.timestamp}.xlsx")
         
-        FileParser.ensure_directories_exist([
+        FileProcessor.ensure_directories_exist([
             self.target_path, self.config_path,
             self.snt_path, self.response_path
         ])
@@ -120,15 +119,15 @@ class AutoSntProcessor:
         """加载所有映射配置"""
         try:
             Logger.info("📋 开始处理映射文件......")
-            sheet_conf = FileParser.parse_mapping_dict(self.sheet_config_file,':', '|', ',', '=')
+            sheet_conf = FileProcessor.parse_mapping_dict(self.sheet_config_file,':', '|', ',', '=')
             self.default_fallback_sheets = sheet_conf.get(self.DEFAULT_SHEET).field_name.split(",")
             self.key_fields = sheet_conf.get(self.KEY_FIELDS).field_name.split(",")
             self.required_fields = sheet_conf.get(self.REQUIRED_FIELDS).field_name.split(",")
             self.sheet_names = sheet_conf.get(self.REQUIRED_SHEET).field_name.split(",")
 
-            self.fixed_mapping = FileParser.parse_mapping_dict(self.fixed_mapping_file,':', '|', ',', '=')   # 模板值映射
-            self.snt_mapping = FileParser.parse_mapping_dict_of_list(self.pending_po_mapping_file,':', '|', ',', '=')
-            self.response_mapping = FileParser.parse_mapping_dict_of_list(self.response_mapping_file,':', '|', ',', '=')
+            self.fixed_mapping = FileProcessor.parse_mapping_dict(self.fixed_mapping_file,':', '|', ',', '=')   # 模板值映射
+            self.snt_mapping = FileProcessor.parse_mapping_dict_of_list(self.pending_po_mapping_file,':', '|', ',', '=')
+            self.response_mapping = FileProcessor.parse_mapping_dict_of_list(self.response_mapping_file,':', '|', ',', '=')
     
             Logger.info("✅ 映射文件加载成功")
         except Exception as e:
@@ -138,8 +137,8 @@ class AutoSntProcessor:
     def _validate_input_files(self):
         """验证输入文件完整性"""
         try:
-            self.snt_files = FileParser.read_files(self.snt_path, [".xlsx", ".xls"])
-            self.response_files = FileParser.read_files(self.response_path, [".xlsx", ".xls"])
+            self.snt_files = FileProcessor.read_files(self.snt_path, [".xlsx", ".xls"])
+            self.response_files = FileProcessor.read_files(self.response_path, [".xlsx", ".xls"])
             
             # 校验所有文件的工作表结构
             all_files = self.snt_files + self.response_files
@@ -167,16 +166,16 @@ class AutoSntProcessor:
         """
         # 首选目标目标表名
         if sheet_name in file_sheets:
-            return file_sheets[sheet_name], True
+            return file_sheets[sheet_name], False
         
         # 回退检查默认表
         for sheet_name in self.default_fallback_sheets:
             ws = file_sheets.get(sheet_name)
             if ws and self._validate_sheet_headers(ws):
                 Logger.info(f"⏩ 使用回退表 [{sheet_name}]")
-                return ws, False
+                return ws, True
         
-        return None, False
+        return None, None
 
     def _validate_sheet_headers(self, worksheet):
         """验证工作表表头是否包含关键字段"""
@@ -221,6 +220,7 @@ class AutoSntProcessor:
     def _process_single_row(self, input_ws, fp, snt_data, base_data, column_mapping, data_lock=None):
         """处理单个工作表的行数据（线程安全版本）"""
         # 获取当前有效工作表的行生成器
+        count = 0
         data_gen = ExcelProcessor.excel_row_generator_skipping(
             input_ws,
             fp,
@@ -232,7 +232,8 @@ class AutoSntProcessor:
         has_valid_data = False
         for row in data_gen:
             has_valid_data = True
-            key = tuple(row[field] for field in self.key_fields)
+            # 如果不用字符串格式存储和读取，就会发生丢数据，匹配更新失败的情况！
+            key = tuple(str(row[field]) for field in self.key_fields)
             if key not in snt_data:
                 Logger.debug(f"未找到匹配项: {key}，跳过更新")
                 continue
@@ -244,7 +245,9 @@ class AutoSntProcessor:
             else:
                 # 非并发场景下的原始逻辑
                 base_data[key].update(ExcelProcessor.column_mapping(row, column_mapping))
-        
+            count += 1 
+
+        Logger.debug(f"{fp} 更新 {count} 行数据")
         return has_valid_data
     
     def _process_single_file(self, sheets_wb_map, sheet_name, fp, snt_data, base_data, column_mapping, data_lock):
@@ -276,7 +279,7 @@ class AutoSntProcessor:
                 Logger.error(f"🛑 文件 {Path(fp).name} 无有效工作表")
                 return
                 
-            # 调用原有的行处理方法（需修改为线程安全版本）
+            # 调用原有的行处理方法（线程安全版本）
             roll_back = not self._process_single_row(input_ws, fp, snt_data, base_data, column_mapping, data_lock)
             
             # 若表中无数据，且使用的不是默认表，则尝试获取默认表数据
@@ -284,7 +287,7 @@ class AutoSntProcessor:
                 has_valid_data = False
                 # 获取默认表
                 for default_sheet_name in self.default_fallback_sheets:
-                    input_ws = self._get_valid_sheet(sheets_wb_map, default_sheet_name)
+                    input_ws, is_defalut_sheet = self._get_valid_sheet(sheets_wb_map, default_sheet_name)
                     # 默认表有效
                     if input_ws and self._validate_sheet_headers(input_ws):
                         Logger.info(f"🛑 文件{fp}⏩ 使用回退表 [{default_sheet_name}]")
@@ -295,6 +298,8 @@ class AutoSntProcessor:
                 if not has_valid_data:
                     # 存在业务场景，sheet_name就是没有业务数据，也不存在默认表
                     Logger.info(f"⚠️ 文件{fp}:【{sheet_name}】中无有效数据")
+            else:
+                Logger.info(f"✅ 文件{fp}⏩ 更新完成")
         except Exception as e:
             Logger.error(f"处理文件 {fp} 时发生错误: {str(e)}")
             raise RuntimeError ("测试")
@@ -320,7 +325,8 @@ class AutoSntProcessor:
                 strict_flag=False
             )
             for row in snt_gen:
-                key = tuple(row[field] for field in self.key_fields)
+                # 如果不用字符串格式存储和读取，就会发生丢数据，匹配更新失败的情况！
+                key = tuple(str(row[field]) for field in self.key_fields)
                 if key in snt_data:
                     Logger.info(f"⚠️ 发现重复基准数据: {key}")
                 snt_data[key] = row
@@ -348,7 +354,7 @@ class AutoSntProcessor:
 
             snt_file, snt_data, base_data = self._load_snt_data(sheet_name, headers)
 
-            # 将sheet_maps中的fp按文件夹分类
+            # 将sheet_maps——{fp_path:sheet_name:wb}中的fp按文件夹分类
             folder_sources = defaultdict(list)
             for fp in self.sheet_maps.keys():
                 if fp == snt_file:
@@ -417,7 +423,8 @@ class AutoSntProcessor:
             # 阶段三：写入最终数据
             # ----------------------------
             # 排序按表头排序
-            ordered_rows = ExcelProcessor.sort_generated_rows(base_data.values(), output_ws)
+            headers = [cell.value for cell in output_ws[1]]
+            ordered_rows = ExcelProcessor.sort_generated_rows(base_data.values(), headers)
             list(map(lambda row: output_ws.append(row), ordered_rows))
             # 格式设置
             self._style_apply(output_ws)
@@ -436,7 +443,7 @@ class AutoSntProcessor:
             self._validate_input_files()
 
             # 阶段2：准备输出文件——给用户反馈的snt文件
-            absolute_path = FileParser.create_newfile_by_template(
+            absolute_path = FileProcessor.create_newfile_by_template(
                 self.template_file,
                 self.target_file,
                 # 直接改模板文件就行
