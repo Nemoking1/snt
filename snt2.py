@@ -40,6 +40,7 @@ class AutoSntProcessor:
         self.config_path = os.path.join(self.current_dir, "conf")
         self.snt_path = os.path.join(self.current_dir, "snt")
         self.response_path = os.path.join(self.current_dir, "res")
+        self.report_path = os.path.join(self.current_dir, "report")
         
         self.template_file = os.path.join(self.current_dir, "template.xlsx")
         self.target_file = os.path.join(self.target_path, f"PendingPoSnt_{self.timestamp}.xlsx")
@@ -48,10 +49,11 @@ class AutoSntProcessor:
         self.fixed_mapping_file = os.path.join(self.config_path, "fixed_mapping.txt")
         self.pending_po_mapping_file = os.path.join(self.config_path, "pending_po_mapping.txt")
         self.response_mapping_file = os.path.join(self.config_path, "response_mapping.txt")
+        self.report_mapping_file = os.path.join(self.config_path, "report_mapping.txt")
         
         FileProcessor.ensure_directories_exist([
             self.target_path, self.config_path,
-            self.snt_path, self.response_path
+            self.snt_path, self.response_path, self.report_path
         ])
 
     def _init_logger(self):
@@ -128,7 +130,8 @@ class AutoSntProcessor:
             self.fixed_mapping = FileProcessor.parse_mapping_dict(self.fixed_mapping_file,':', '|', ',', '=')   # 模板值映射
             self.snt_mapping = FileProcessor.parse_mapping_dict_of_list(self.pending_po_mapping_file,':', '|', ',', '=')
             self.response_mapping = FileProcessor.parse_mapping_dict_of_list(self.response_mapping_file,':', '|', ',', '=')
-    
+            self.report_mapping = FileProcessor.parse_mapping_dict_of_list(self.report_mapping_file,':', '|', ',', '=')
+
             Logger.info("✅ 映射文件加载成功")
         except Exception as e:
             Logger.error(f"❌ 映射文件加载失败: {str(e)}")
@@ -139,9 +142,10 @@ class AutoSntProcessor:
         try:
             self.snt_files = FileProcessor.read_files(self.snt_path, [".xlsx", ".xls"])
             self.response_files = FileProcessor.read_files(self.response_path, [".xlsx", ".xls"])
-            
+            self.report_files = FileProcessor.read_files(self.report_path, [".xlsx", ".xls"])
+
             # 校验所有文件的工作表结构
-            all_files = self.snt_files + self.response_files
+            all_files = self.snt_files + self.response_files + self.report_files
             # 预设模板文件检查（保持严格校验）
             self.sheet_maps = ExcelProcessor.get_excel_sheets(
                 file_paths=all_files,
@@ -163,19 +167,20 @@ class AutoSntProcessor:
         返回值：
         - 工作表对象
         - 是否有使用回退表
+        - 使用的回退表名
         """
         # 首选目标目标表名
         if sheet_name in file_sheets:
-            return file_sheets[sheet_name], False
+            return file_sheets[sheet_name], False, None
         
         # 回退检查默认表
-        for sheet_name in self.default_fallback_sheets:
-            ws = file_sheets.get(sheet_name)
+        for default_sheet_name in self.default_fallback_sheets:
+            ws = file_sheets.get(default_sheet_name)
             if ws and self._validate_sheet_headers(ws):
-                Logger.info(f"⏩ 使用回退表 [{sheet_name}]")
-                return ws, True
+                Logger.debug(f"🛑 {sheet_name}不存在：检查回退表 [{default_sheet_name}]【可用】")
+                return ws, True, default_sheet_name
         
-        return None, None
+        return None, None, None
 
     def _validate_sheet_headers(self, worksheet):
         """验证工作表表头是否包含关键字段"""
@@ -190,33 +195,35 @@ class AutoSntProcessor:
         """从文件路径解析文件夹类型"""
         if os.path.commonpath([file_path, self.response_path]) == self.response_path:
             return os.path.basename(self.response_path)
-        if os.path.commonpath([file_path, self.snt_path]) == self.snt_path:
+        elif os.path.commonpath([file_path, self.snt_path]) == self.snt_path:
             return os.path.basename(self.snt_path)
+        elif os.path.commonpath([file_path, self.report_path]) == self.report_path:
+            return os.path.basename(self.report_path)
         else:
             return "other"
 
-    def _process_single_row(self, input_ws, fp, progress, snt_data, base_data, column_mapping):
+    # def _process_single_row(self, input_ws, fp, progress, snt_data, base_data, column_mapping):
 
-        # 获取当前有效工作表的行生成器，检查REQUIRED_FIELDS是否存在数据，都不存在会报错
-        data_gen = ExcelProcessor.excel_row_generator_skipping(
-            input_ws,
-            fp,
-            progress,
-            self.required_fields,
-            strict_flag=False
-        )
-        # 如果一条数据也遍历不到，则当前的工作表无效——不存在任何REQUIRED_FIELDS有值的情况，回滚到默认表
-        has_valid_data = False
-        for row in data_gen:
-            has_valid_data = True
-            key = tuple(row[field] for field in self.key_fields)
-            if key not in snt_data:
-                Logger.debug(f"未找到匹配项: {key}，跳过更新")
-                continue
+    #     # 获取当前有效工作表的行生成器，检查REQUIRED_FIELDS是否存在数据，都不存在会报错
+    #     data_gen = ExcelProcessor.excel_row_generator_skipping(
+    #         input_ws,
+    #         fp,
+    #         progress,
+    #         self.required_fields,
+    #         strict_flag=False
+    #     )
+    #     # 如果一条数据也遍历不到，则当前的工作表无效——不存在任何REQUIRED_FIELDS有值的情况，回滚到默认表
+    #     has_valid_data = False
+    #     for row in data_gen:
+    #         has_valid_data = True
+    #         key = tuple(row[field] for field in self.key_fields)
+    #         if key not in snt_data:
+    #             Logger.debug(f"未找到匹配项: {key}，跳过更新")
+    #             continue
             
-            base_data[key].update(ExcelProcessor.column_mapping(row, column_mapping))
-            # Logger.info(f"更新 {key} 的 {column_mapping} 列")
-        return has_valid_data
+    #         base_data[key].update(ExcelProcessor.column_mapping(row, column_mapping))
+    #         # Logger.info(f"更新 {key} 的 {column_mapping} 列")
+    #     return has_valid_data
     def _process_single_row(self, input_ws, fp, snt_data, base_data, column_mapping, data_lock=None):
         """处理单个工作表的行数据（线程安全版本）"""
         # 获取当前有效工作表的行生成器
@@ -274,7 +281,7 @@ class AutoSntProcessor:
         """
         try:
             # 获取有效工作表(如果找不到Sheet_name，则使用默认回退表)
-            input_ws, is_defalut_sheet = self._get_valid_sheet(sheets_wb_map, sheet_name)
+            input_ws, is_defalut_sheet, rollback_sheet_name = self._get_valid_sheet(sheets_wb_map, sheet_name)
             if not input_ws:
                 Logger.error(f"🛑 文件 {Path(fp).name} 无有效工作表")
                 return
@@ -287,9 +294,9 @@ class AutoSntProcessor:
                 has_valid_data = False
                 # 获取默认表
                 for default_sheet_name in self.default_fallback_sheets:
-                    input_ws, is_defalut_sheet = self._get_valid_sheet(sheets_wb_map, default_sheet_name)
-                    # 默认表有效
-                    if input_ws and self._validate_sheet_headers(input_ws):
+                    input_ws, is_defalut_sheet, rollback_sheet_name = self._get_valid_sheet(sheets_wb_map, default_sheet_name)
+                    # 默认表名有效——input_ws有值且is_defalut_sheet为false
+                    if input_ws and not is_defalut_sheet and self._validate_sheet_headers(input_ws):
                         Logger.info(f"🛑 文件{fp}⏩ 使用回退表 [{default_sheet_name}]")
                         # 不短路
                         has_valid_data = has_valid_data | self._process_single_row(
@@ -298,15 +305,18 @@ class AutoSntProcessor:
                 if not has_valid_data:
                     # 存在业务场景，sheet_name就是没有业务数据，也不存在默认表
                     Logger.info(f"⚠️ 文件{fp}:【{sheet_name}】中无有效数据")
-            else:
-                Logger.info(f"✅ 文件{fp}⏩ 更新完成")
+
+            elif is_defalut_sheet and not roll_back:
+                Logger.info(f"🛑 文件{fp}⏩ 使用回退表 [{rollback_sheet_name}]")
+
+            Logger.info(f"✅ 文件{fp}⏩ 更新完成")
         except Exception as e:
             Logger.error(f"处理文件 {fp} 时发生错误: {str(e)}")
             raise RuntimeError ("测试")
 
     def _load_snt_data(self, sheet_name, headers):
         """
-        将snt当前sheet_name数据存在关键字段keys——用于联系数据，的行写入内存{key_tuple,row}
+        将snt当前sheet_name数据存在关键字段keys——用于联系数据，的行写入内存{key_tuple,row}，并生成snt_map和fix_map映射后的结果数据base_data
         """
         try:
             snt_file = next((fp for fp in self.sheet_maps.keys() if self._get_folder_type(fp) == os.path.basename(self.snt_path)), None)
@@ -350,8 +360,8 @@ class AutoSntProcessor:
             # 获取当前sheet_name工作表的输出句柄、表头列表，用于后续处理
             output_ws = output_wb[sheet_name]
             headers = [cell.value for cell in output_ws[1]]
+            Logger.info(f"{'='*75}")
             Logger.info(f"🔨 开始处理工作表 [{sheet_name}]")
-
             snt_file, snt_data, base_data = self._load_snt_data(sheet_name, headers)
 
             # 将sheet_maps——{fp_path:sheet_name:wb}中的fp按文件夹分类
@@ -364,8 +374,8 @@ class AutoSntProcessor:
             # 所有文件夹
             for folder, fps in folder_sources.items():
                 Logger.info(f"🔄 正在处理 [{folder}] 文件夹内数据...")
-                
-                column_mapping =  self.response_mapping # TODO 扩充至report_mapping
+                column_mapping = self.response_mapping if folder == 'res' else (self.report_mapping if folder == 'report' else None)
+                # column_mapping =  self.response_mapping if folder == 'res' # TODO 扩充至report_mapping
                 if not column_mapping:
                     raise RuntimeError (f"⚠️ 未找到 [{folder}] 的列映射配置")
 
@@ -391,33 +401,6 @@ class AutoSntProcessor:
                 # 等待所有任务完成
                 for future in futures:
                     future.result()  # 获取结果，触发可能的异常
-                # # 当前文件夹的所有文件
-                # for fp in fps:
-                #     sheets_wb = self.sheet_maps[fp]
-                #     # 获取有效工作表(如果找不到Sheet_name，则使用默认回退表)
-                #     input_ws, is_defalut_sheet = self._get_valid_sheet(sheets_wb, sheet_name)
-                #     if not input_ws:
-                #         Logger.error(f"🛑 文件 {Path(fp).name} 无有效工作表")
-                #         continue
-                #     progress = ProgressManager()
-                #     roll_back = not self._process_single_row(input_ws, fp, progress, snt_data, base_data, column_mapping)
-                #     progress.close()
-                #     # 若表中无数据，且使用的不是默认表，则尝试获取默认表数据
-                #     if not is_defalut_sheet and roll_back:
-                #         has_valid_data = False
-                #         # 获取默认表
-                #         for default_sheet_name in self.default_fallback_sheets:
-                #             input_ws = self._get_valid_sheet(sheets_wb, default_sheet_name)
-                #             # 默认表有效
-                #             if input_ws and self._validate_sheet_headers(input_ws):
-                #                 Logger.info(f"🛑 文件{fp}⏩ 使用回退表 [{default_sheet_name}]")
-                #                 progress = ProgressManager()
-                #                 # 不短路
-                #                 has_valid_data = has_valid_data | self._process_single_row(input_ws, fp, progress, snt_data, base_data, column_mapping)
-                #                 progress.close()
-                #         if not has_valid_data:
-                #             # 存在业务场景，sheet_name就是没有业务数据，也不存在默认表
-                #             Logger.info(f"⚠️ 文件{fp}:【{sheet_name}】中无有效数据")
                     
             # ----------------------------
             # 阶段三：写入最终数据

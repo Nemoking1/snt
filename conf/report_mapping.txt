@@ -1,0 +1,4 @@
+VendorContact:VendorContact|considerEmpty=True
+BookingRequestDate:BookingRequestDate|considerEmpty=True
+BookingConfirmDate:BookingConfirmDate|considerEmpty=True
+ASNDate:ASNDate|considerEmpty=True

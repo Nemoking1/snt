@@ -1,2 +1,6 @@
 列1:空
 列2:空
+VendorContact:空
+BookingRequestDate:空
+BookingConfirmDate:空
+ASNDate:空
