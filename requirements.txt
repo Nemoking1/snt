@@ -1,6 +1,9 @@
--e .
+beautifulsoup4==4.13.4
+Deprecated==1.2.18
 openpyxl==3.1.5
 pandas==2.3.1
 plotly==6.2.0
+setuptools==58.1.0
 streamlit==1.46.1
-streamlit_autorefresh==1.0.1
+tqdm==4.67.1
+xlrd==2.0.2
