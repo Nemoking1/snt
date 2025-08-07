@@ -1,3 +1,4 @@
+-e .
 beautifulsoup4==4.13.4
 Deprecated==1.2.18
 openpyxl==3.1.5
