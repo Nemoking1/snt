@@ -4,3 +4,10 @@ VendorContact:空
 BookingRequestDate:空
 BookingConfirmDate:空
 ASNDate:空
+SHIPPING MODE:空
+shipment number:空
+ETD:空
+ETA:空
+SO:空
+ATD:空
+Container:空
