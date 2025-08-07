@@ -1,2 +1,6 @@
-logs/*.log
-target/*.xlsx
+__pycache__/
+*.pyc
+.env
+logs/
+target/
+*.egg-info/
