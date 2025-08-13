@@ -182,8 +182,8 @@ class DataModel:
         # 分析required_fields
         for field in self.required_fields:
             if field in df.columns:
-                # 字段统计
-                field_counts = df[field].value_counts(dropna=False)
+                # 字段统计_排除Nan空值
+                field_counts = df[field].value_counts(dropna=True)
                 analysis['field_stats'][field] = {
                     'unique_count': df[field].nunique(),
                     'value_counts': field_counts.to_dict(),
@@ -191,7 +191,7 @@ class DataModel:
                 }
                 
                 # 图表数据
-                analysis['charts_data'][field] = field_counts.head(10)
+                analysis['charts_data'][field] = field_counts
         
         # 查找异常数据（required_fields均为空）
         if all(field in df.columns for field in self.required_fields):
@@ -788,7 +788,7 @@ class AnalysisView(BaseView):
                             x='count', 
                             y='category',
                             orientation='h',
-                            title=f"{field} 前10类型分布",
+                            title=f"{field} 类型分布",
                             color='count',
                             color_continuous_scale='viridis'
                         )
